@@ -56,7 +56,7 @@ def load_verifiers_run(run_dir: str | Path) -> Iterator[AgentRun]:
     does.
     """
     run_dir = Path(run_dir)
-    run = _run_facts(run_dir)
+    run = run_facts(run_dir)
     with open(run_dir / TRACES_FILE, encoding="utf-8") as f:
         for number, line in enumerate(f, start=1):
             if not line.strip():
@@ -173,7 +173,7 @@ def _name(metadata: dict[str, Any]) -> str:
     return f"{label} · {where}" if where else label
 
 
-def _run_facts(run_dir: Path) -> dict[str, Any]:
+def run_facts(run_dir: Path) -> dict[str, Any]:
     """The run's name from its resolved config, when it has one; the directory
     otherwise."""
     facts: dict[str, Any] = {"dir": run_dir.name}
