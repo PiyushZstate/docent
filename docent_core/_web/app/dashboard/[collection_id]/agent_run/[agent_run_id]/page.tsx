@@ -29,10 +29,13 @@ export default function AgentRunPage() {
     (state) => state.transcript?.agentRunSidebarTab ?? 'chat'
   );
 
-  const params = useParams();
-  const curAgentRunId = Array.isArray(params.agent_run_id)
-    ? params.agent_run_id[0]
-    : params.agent_run_id;
+  // Next 16 types every route param as possibly undefined; this page's route
+  // always has its [agent_run_id] segment.
+  const params = useParams<{ agent_run_id: string | string[] }>();
+  const curAgentRunId =
+    (Array.isArray(params.agent_run_id)
+      ? params.agent_run_id[0]
+      : params.agent_run_id) ?? '';
 
   const agentRunViewerRef = useRef<AgentRunViewerHandle | null>(null);
 

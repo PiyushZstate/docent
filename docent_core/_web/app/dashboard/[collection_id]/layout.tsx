@@ -15,20 +15,21 @@ export default async function DocentDashboardLayout({
   params,
 }: {
   children: React.ReactNode;
-  params: { collection_id: string };
+  // Next 15 and later pass params, headers and cookies as promises.
+  params: Promise<{ collection_id: string }>;
 }) {
-  const collectionId = params.collection_id;
+  const { collection_id: collectionId } = await params;
 
   try {
     // Check for middleware-provided cookies first, then fall back to actual cookies
-    const headerStore = headers();
+    const headerStore = await headers();
     const middlewareCookies = headerStore.get('x-middleware-cookies');
 
     let cookieString: string;
     if (middlewareCookies) {
       cookieString = middlewareCookies;
     } else {
-      const cookieStore = cookies();
+      const cookieStore = await cookies();
       cookieString = cookieStore.toString();
     }
 

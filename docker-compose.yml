@@ -21,7 +21,9 @@ services:
       - ENV_RESOLUTION_STRATEGY=os_environ
       - DOCENT_PG_HOST=postgres
       - DOCENT_REDIS_HOST=redis
-    command: bash -c "docent_core server --port ${DOCENT_SERVER_PORT:-8888} --workers 8"
+    # Migrate first: nothing else creates the tables, so a fresh database
+    # otherwise fails every request with "relation users does not exist".
+    command: bash -c "alembic upgrade head && docent_core server --port ${DOCENT_SERVER_PORT:-8888} --workers 8"
     restart: unless-stopped
 
   worker:

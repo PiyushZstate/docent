@@ -6,11 +6,13 @@ FROM base AS deps
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
 
-# Copy package.json and package-lock.json
-COPY docent_core/_web/package*.json ./
+# The frontend's lockfile is bun.lock since 9700ec0 removed package-lock.json,
+# so `npm ci` has nothing to install from. Not frozen: upstream's bun.lock at
+# 07edc43 no longer matches its package.json, so bun updates it here.
+COPY docent_core/_web/package.json docent_core/_web/bun.lock ./
 
 # Install dependencies (including dev dependencies for build stage)
-RUN npm ci --legacy-peer-deps
+RUN npm install -g bun && bun install
 
 # Rebuild the source code only when needed
 FROM base AS builder
