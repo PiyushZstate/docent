@@ -4,7 +4,7 @@ Each run directory (`<root>/outputs/<run>/traces.jsonl`, as `vf-eval` writes it)
 gets one collection, and each new episode line its agent runs, as the line is
 written. Usage:
 
-    python -m docent.loaders.watch_verifiers ROOT [ROOT ...]
+    python -m docent.loaders.watch_verifiers [ROOT ...] [--roots-file FILE]
         [--server-url URL] [--web-url URL] [--interval SECONDS] [--once]
 
 with the API key in `DOCENT_API_KEY`.
@@ -81,23 +81,38 @@ def agent_run_id(collection: str, run: AgentRun) -> str:
     return str(uuid.uuid5(NAMESPACE, f"{collection}/{episode}/{trace}"))
 
 
+def read_roots(path: Path) -> list[Path]:
+    """Roots listed one per line; blank lines and `#` comments are skipped. A
+    missing file lists none, so a watcher can start before its owner writes it."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    lines = (line.strip() for line in text.splitlines())
+    return [Path(line) for line in lines if line and not line.startswith("#")]
+
+
 class Watcher:
-    def __init__(self, client: DocentClient, roots: list[Path]):
+    def __init__(self, client: DocentClient, roots: list[Path], roots_file: Path | None = None):
         self.client = client
         self.roots = roots
+        # Reread on every pass, so whoever owns it (Zeron's engine) can add a new
+        # worktree without restarting the watcher.
+        self.roots_file = roots_file
         self._tails: dict[Path, _Tail] = {}
         self._collections: dict[Path, _Collection] = {}
         self._existing: set[str] | None = None
 
     def run_dirs(self) -> list[Path]:
         """Run directories under the roots: a root that is itself a run, or the
-        runs in its `outputs/`."""
+        runs in its `outputs/`. Each is listed once, however many roots reach it."""
+        roots = [*self.roots, *(read_roots(self.roots_file) if self.roots_file else [])]
         found: list[Path] = []
-        for root in self.roots:
+        for root in dict.fromkeys(roots):
             if (root / TRACES_FILE).is_file():
                 found.append(root)
             found.extend(sorted(p.parent for p in root.glob(f"outputs/*/{TRACES_FILE}")))
-        return found
+        return list(dict.fromkeys(found))
 
     def poll(self) -> int:
         """One pass over every run. Returns how many agent runs were added."""
@@ -115,19 +130,26 @@ class Watcher:
         tail = self._tails.setdefault(path, _Tail())
         if (stat.st_ino, stat.st_size, stat.st_mtime_ns) == (tail.inode, tail.size, tail.mtime_ns):
             return 0
-        if stat.st_ino != tail.inode or stat.st_size < tail.offset:
+        offset = tail.offset
+        if stat.st_ino != tail.inode or stat.st_size < offset:
             # A new file, or one rewritten in place (`--resume` writes a temporary
             # file and renames it over): read it again from the start. Ids already
             # in Docent are skipped below.
-            tail.offset = 0
+            offset = 0
         with open(path, "rb") as f:
-            f.seek(tail.offset)
+            f.seek(offset)
             chunk = f.read()
         end = chunk.rfind(b"\n") + 1
         lines = chunk[:end].decode("utf-8", errors="replace").splitlines()
-        tail.inode, tail.size, tail.mtime_ns = stat.st_ino, stat.st_size, stat.st_mtime_ns
-        tail.offset += end
+
+        # The tail moves only once Docent has taken the lines: a failed add (Docent
+        # still starting, say) raises out of here and the next pass reads them again.
+        def commit() -> None:
+            tail.inode, tail.size, tail.mtime_ns = stat.st_ino, stat.st_size, stat.st_mtime_ns
+            tail.offset = offset + end
+
         if not lines:
+            commit()
             return 0
 
         collection = self._collection(run_dir)
@@ -145,12 +167,13 @@ class Watcher:
                 continue
             for run in load_verifiers_episode(cast(dict[str, Any], episode), facts):
                 run.id = agent_run_id(collection.id, run)
-                if run.id not in collection.known:
-                    collection.known.add(run.id)
+                if run.id not in collection.known and all(r.id != run.id for r in fresh):
                     fresh.append(run)
         if fresh:
             self.client.add_agent_runs(collection.id, fresh)
+            collection.known.update(r.id for r in fresh)
             logger.info(f"{run_dir.name}: added {len(fresh)} agent runs")
+        commit()
         return len(fresh)
 
     def _collection(self, run_dir: Path) -> _Collection:
@@ -176,19 +199,36 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Keep Docent up to date with the verifiers runs under some directories."
     )
-    parser.add_argument("roots", nargs="+", type=Path)
+    parser.add_argument("roots", nargs="*", type=Path)
+    parser.add_argument(
+        "--roots-file",
+        type=Path,
+        help="more roots, one per line, reread on every pass",
+    )
     parser.add_argument("--server-url", default="http://localhost:8889")
     parser.add_argument("--web-url", default="http://localhost:3001")
     parser.add_argument("--interval", type=float, default=2.0)
     parser.add_argument("--once", action="store_true", help="one pass, then exit")
     args = parser.parse_args()
+    if not args.roots and args.roots_file is None:
+        parser.error("give at least one root or --roots-file")
 
     from docent import Docent
 
-    client = Docent(
-        api_key=os.environ.get("DOCENT_API_KEY"), server_url=args.server_url, web_url=args.web_url
-    )
-    watcher = Watcher(client, args.roots)
+    # The client checks its key with the server as it is made. Whoever starts the
+    # watcher may have just started Docent too, so wait for it rather than exit.
+    while True:
+        try:
+            client = Docent(
+                api_key=os.environ.get("DOCENT_API_KEY"),
+                server_url=args.server_url,
+                web_url=args.web_url,
+            )
+            break
+        except OSError as e:
+            logger.warning(f"Docent is not reachable yet: {e}")
+            time.sleep(args.interval)
+    watcher = Watcher(client, args.roots, args.roots_file)
     while True:
         watcher.poll()
         if args.once:

@@ -135,3 +135,47 @@ def test_a_root_can_be_a_run_directory_itself(tmp_path: Path):
     run = _run(tmp_path)
     _append(run, _episode(1) + "\n")
     assert Watcher(docent, [run]).poll() == 1
+
+
+@pytest.mark.unit
+def test_the_roots_file_is_reread_on_every_pass(tmp_path: Path):
+    docent = FakeDocent()
+    roots_file = tmp_path / "roots"
+    watcher = Watcher(docent, [], roots_file)
+    # Missing to begin with: the engine may start the watcher before writing it.
+    assert watcher.poll() == 0
+    first, second = tmp_path / "a", tmp_path / "b"
+    _append(_run(first), _episode(1) + "\n")
+    _append(_run(second), _episode(2) + "\n")
+    roots_file.write_text(f"# worktrees\n{first}\n\n")
+    assert watcher.poll() == 1
+    roots_file.write_text(f"{first}\n{second}\n{second}\n")
+    assert watcher.poll() == 1
+    assert len(docent.collections) == 2
+
+
+class FlakyDocent(FakeDocent):
+    """Refuses adds while `down`, as Docent does while it is still starting."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.down = True
+
+    def add_agent_runs(self, collection_id: str, agent_runs: list[AgentRun]) -> dict[str, Any]:
+        if self.down:
+            raise ConnectionError("Docent is not up yet")
+        return super().add_agent_runs(collection_id, agent_runs)
+
+
+@pytest.mark.unit
+def test_lines_a_failed_add_refused_are_sent_on_the_next_pass(tmp_path: Path):
+    docent = FlakyDocent()
+    run = _run(tmp_path)
+    watcher = Watcher(docent, [tmp_path])
+    _append(run, _episode(1) + "\n")
+    assert watcher.poll() == 0
+    docent.down = False
+    assert watcher.poll() == 1
+    assert watcher.poll() == 0
+    [cid] = docent.collections
+    assert [r.metadata["episode_id"] for r in docent.runs[cid]] == ["e1"]
